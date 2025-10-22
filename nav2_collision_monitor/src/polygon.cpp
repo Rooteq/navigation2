@@ -164,11 +164,13 @@ std::vector<std::string> Polygon::getSourcesNames() const
 
 void Polygon::getPolygon(std::vector<Point> & poly) const
 {
+  std::lock_guard<std::mutex> lock(polygon_mutex_);
   poly = poly_;
 }
 
 bool Polygon::isShapeSet()
 {
+  std::lock_guard<std::mutex> lock(polygon_mutex_);
   if (poly_.empty()) {
     RCLCPP_WARN(logger_, "[%s]: Polygon shape is not set yet", polygon_name_.c_str());
     return false;
@@ -178,6 +180,7 @@ bool Polygon::isShapeSet()
 
 void Polygon::updatePolygon(const Velocity & /*cmd_vel_in*/)
 {
+  std::lock_guard<std::mutex> lock(polygon_mutex_);
   if (footprint_sub_ != nullptr) {
     // Get latest robot footprint from footprint subscriber
     std::vector<geometry_msgs::msg::Point> footprint_vec;
@@ -576,12 +579,75 @@ Polygon::dynamicParametersCallback(
     const auto & param_type = parameter.get_type();
     const auto & param_name = parameter.get_name();
 
-    if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL) {
+    if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL) 
+    {
       if (param_name == polygon_name_ + "." + "enabled") {
         enabled_ = parameter.as_bool();
       }
+    } 
+    else if(param_type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING)
+    {
+      if (param_name == polygon_name_ + "." + "points") 
+      {
+        std::string poly_string = parameter.as_string();
+        std::vector<Point> new_poly;
+
+        if(getPolygonFromString(poly_string, new_poly)) 
+        {
+          std::lock_guard<std::mutex> lock(polygon_mutex_);
+
+          poly_ = new_poly;
+
+          // Update visualization polygon if needed
+          if (visualize_) {
+            polygon_.polygon.points.clear();
+            for (const Point & p : poly_) {
+              geometry_msgs::msg::Point32 p_s;
+              p_s.x = p.x;
+              p_s.y = p.y;
+              polygon_.polygon.points.push_back(p_s);
+            }
+          }
+
+          RCLCPP_INFO(
+              logger_,
+              "[%s]: Polygon points updated dynamically with %zu points",
+              polygon_name_.c_str(), poly_.size());
+
+        } 
+        else 
+        {
+          result.successful = false;
+          result.reason = "Failed to parse polygon points string";
+          return result;
+        }
+      }
+    }
+    else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE) 
+    {
+      // Handle other dynamic parameters
+      if (param_name == polygon_name_ + "." + "slowdown_ratio") {
+        if (action_type_ == SLOWDOWN) {
+          slowdown_ratio_ = parameter.as_double();
+        }
+      } else if (param_name == polygon_name_ + "." + "linear_limit") {
+        if (action_type_ == LIMIT) {
+          linear_limit_ = parameter.as_double();
+        }
+      } else if (param_name == polygon_name_ + "." + "angular_limit") {
+        if (action_type_ == LIMIT) {
+          angular_limit_ = parameter.as_double();
+        }
+      }
+    } 
+    else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) 
+    {
+      if (param_name == polygon_name_ + "." + "min_points") {
+        min_points_ = parameter.as_int();
     }
   }
+  }
+
   result.successful = true;
   return result;
 }

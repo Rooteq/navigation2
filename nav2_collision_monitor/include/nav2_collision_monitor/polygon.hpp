@@ -309,6 +309,10 @@ protected:
 
   /// @brief Polygon points (vertices) in a base_frame_id_
   std::vector<Point> poly_;
+
+private:
+  mutable std::mutex polygon_mutex_;
+
 };  // class Polygon
 
 }  // namespace nav2_collision_monitor
