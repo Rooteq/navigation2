@@ -23,6 +23,8 @@
 
 #include "nav2_util/node_utils.hpp"
 
+#include "nav2_collision_monitor/set_polygons_service.hpp"
+
 using namespace std::chrono_literals;
 
 namespace nav2_collision_monitor
@@ -63,6 +65,13 @@ CollisionDetector::on_configure(const rclcpp_lifecycle::State & state)
     on_cleanup(state);
     return nav2_util::CallbackReturn::FAILURE;
   }
+
+  // Polygon shapes update service initialization
+  set_polygons_service_ = create_service<nav2_collision_monitor_msgs::srv::SetPolygons>(
+    "~/set_polygons",
+    std::bind(
+      &CollisionDetector::setPolygonsServiceCallback, this,
+      std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 
   return nav2_util::CallbackReturn::SUCCESS;
 }
@@ -122,6 +131,7 @@ CollisionDetector::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
 
   state_pub_.reset();
   collision_points_marker_pub_.reset();
+  set_polygons_service_.reset();
 
   polygons_.clear();
   sources_.clear();
@@ -389,6 +399,14 @@ void CollisionDetector::publishPolygons() const
       polygon->publish();
     }
   }
+}
+
+void CollisionDetector::setPolygonsServiceCallback(
+  const std::shared_ptr<rmw_request_id_t>/*request_header*/,
+  const std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Request> request,
+  std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Response> response)
+{
+  handleSetPolygons(*this, polygons_, *request, *response);
 }
 
 }  // namespace nav2_collision_monitor

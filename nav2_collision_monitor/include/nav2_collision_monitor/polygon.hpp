@@ -233,11 +233,26 @@ protected:
   void polygonCallback(geometry_msgs::msg::PolygonStamped::ConstSharedPtr msg);
 
   /**
-   * @brief Callback executed when a parameter change is detected
-   * @param event ParameterEvent message
+   * @brief Checks parameter changes before they are accepted.
+   * Rejects malformed "points" and "points" changes of polygons
+   * that take their shape from a topic or footprint.
+   * @param parameters List of parameters that are going to be changed
+   * @return Whether the changes may be accepted (with a reason if not)
    */
-  rcl_interfaces::msg::SetParametersResult dynamicParametersCallback(
-    std::vector<rclcpp::Parameter> parameters);
+  rcl_interfaces::msg::SetParametersResult validateParameterUpdatesCallback(
+    const std::vector<rclcpp::Parameter> & parameters);
+
+  /**
+   * @brief Applies parameter changes after they were accepted
+   * @param parameters List of parameters that were changed
+   */
+  void updateParametersCallback(const std::vector<rclcpp::Parameter> & parameters);
+
+  /**
+   * @brief Sets new polygon vertices and the matching visualization polygon
+   * @param poly New polygon vertices in a base_frame_id_
+   */
+  void setPolygon(const std::vector<Point> & poly);
 
   /**
    * @brief Checks if point is inside polygon
@@ -260,8 +275,10 @@ protected:
   nav2_util::LifecycleNode::WeakPtr node_;
   /// @brief Collision monitor node logger stored for further usage
   rclcpp::Logger logger_{rclcpp::get_logger("collision_monitor")};
-  /// @brief Dynamic parameters handler
+  /// @brief Dynamic parameters validation handler
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
+  /// @brief Dynamic parameters update handler
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr post_set_params_handler_;
 
   // Basic parameters
   /// @brief Name of polygon
@@ -309,10 +326,6 @@ protected:
 
   /// @brief Polygon points (vertices) in a base_frame_id_
   std::vector<Point> poly_;
-
-private:
-  mutable std::mutex polygon_mutex_;
-
 };  // class Polygon
 
 }  // namespace nav2_collision_monitor

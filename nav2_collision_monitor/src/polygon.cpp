@@ -51,6 +51,7 @@ Polygon::~Polygon()
   polygon_pub_.reset();
   poly_.clear();
   dyn_params_handler_.reset();
+  post_set_params_handler_.reset();
 }
 
 bool Polygon::configure()
@@ -96,9 +97,12 @@ bool Polygon::configure()
       polygon_pub_topic, polygon_qos);
   }
 
-  // Add callback for dynamic parameters
+  // Add callbacks for dynamic parameters: changes are checked first (and the whole
+  // set rejected on any error), and applied only after all of them were accepted
   dyn_params_handler_ = node->add_on_set_parameters_callback(
-    std::bind(&Polygon::dynamicParametersCallback, this, std::placeholders::_1));
+    std::bind(&Polygon::validateParameterUpdatesCallback, this, std::placeholders::_1));
+  post_set_params_handler_ = node->add_post_set_parameters_callback(
+    std::bind(&Polygon::updateParametersCallback, this, std::placeholders::_1));
 
   return true;
 }
@@ -164,13 +168,11 @@ std::vector<std::string> Polygon::getSourcesNames() const
 
 void Polygon::getPolygon(std::vector<Point> & poly) const
 {
-  std::lock_guard<std::mutex> lock(polygon_mutex_);
   poly = poly_;
 }
 
 bool Polygon::isShapeSet()
 {
-  std::lock_guard<std::mutex> lock(polygon_mutex_);
   if (poly_.empty()) {
     RCLCPP_WARN(logger_, "[%s]: Polygon shape is not set yet", polygon_name_.c_str());
     return false;
@@ -180,7 +182,6 @@ bool Polygon::isShapeSet()
 
 void Polygon::updatePolygon(const Velocity & /*cmd_vel_in*/)
 {
-  std::lock_guard<std::mutex> lock(polygon_mutex_);
   if (footprint_sub_ != nullptr) {
     // Get latest robot footprint from footprint subscriber
     std::vector<geometry_msgs::msg::Point> footprint_vec;
@@ -570,86 +571,103 @@ void Polygon::updatePolygon(geometry_msgs::msg::PolygonStamped::ConstSharedPtr m
 }
 
 rcl_interfaces::msg::SetParametersResult
-Polygon::dynamicParametersCallback(
-  std::vector<rclcpp::Parameter> parameters)
+Polygon::validateParameterUpdatesCallback(
+  const std::vector<rclcpp::Parameter> & parameters)
 {
   rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
 
-  for (auto parameter : parameters) {
+  for (const auto & parameter : parameters) {
+    if (parameter.get_name() != polygon_name_ + ".points" ||
+      parameter.get_type() != rcl_interfaces::msg::ParameterType::PARAMETER_STRING)
+    {
+      continue;
+    }
+
+    // Shape of a topic-driven polygon is overwritten by the topic on every update
+    if (polygon_sub_ != nullptr || footprint_sub_ != nullptr) {
+      result.successful = false;
+      result.reason = "[" + polygon_name_ + "]: polygon takes its shape from a topic, "
+        "its points cannot be changed";
+      return result;
+    }
+
+    std::string poly_string = parameter.as_string();
+    std::vector<Point> poly;
+    if (!getPolygonFromString(poly_string, poly)) {
+      result.successful = false;
+      result.reason = "[" + polygon_name_ + "]: invalid points \"" + poly_string +
+        "\", expected \"[[x1, y1], [x2, y2], [x3, y3], [x4, y4], ...]\" (at least 4 vertices)";
+      return result;
+    }
+  }
+
+  return result;
+}
+
+void Polygon::updateParametersCallback(const std::vector<rclcpp::Parameter> & parameters)
+{
+  for (const auto & parameter : parameters) {
     const auto & param_type = parameter.get_type();
     const auto & param_name = parameter.get_name();
 
-    if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL) 
-    {
-      if (param_name == polygon_name_ + "." + "enabled") {
+    if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL) {
+      if (param_name == polygon_name_ + ".enabled") {
+        const bool was_enabled = enabled_;
         enabled_ = parameter.as_bool();
-      }
-    } 
-    else if(param_type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING)
-    {
-      if (param_name == polygon_name_ + "." + "points") 
-      {
-        std::string poly_string = parameter.as_string();
-        std::vector<Point> new_poly;
-
-        if(getPolygonFromString(poly_string, new_poly)) 
+        // A disabled polygon is not published any more: clear its last shape in viewers
+        if (was_enabled && !enabled_ && visualize_ && polygon_pub_ &&
+          polygon_pub_->is_activated())
         {
-          std::lock_guard<std::mutex> lock(polygon_mutex_);
-
-          poly_ = new_poly;
-
-          // Update visualization polygon if needed
-          if (visualize_) {
-            polygon_.polygon.points.clear();
-            for (const Point & p : poly_) {
-              geometry_msgs::msg::Point32 p_s;
-              p_s.x = p.x;
-              p_s.y = p.y;
-              polygon_.polygon.points.push_back(p_s);
-            }
+          auto msg = std::make_unique<geometry_msgs::msg::PolygonStamped>();
+          msg->header.frame_id = polygon_.header.frame_id;
+          if (auto node = node_.lock()) {
+            msg->header.stamp = node->now();
           }
-
+          polygon_pub_->publish(std::move(msg));
+        }
+      }
+    } else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
+      if (param_name == polygon_name_ + ".points") {
+        // Already checked in validateParameterUpdatesCallback()
+        std::string poly_string = parameter.as_string();
+        std::vector<Point> poly;
+        if (getPolygonFromString(poly_string, poly)) {
+          setPolygon(poly);
           RCLCPP_INFO(
-              logger_,
-              "[%s]: Polygon points updated dynamically with %zu points",
-              polygon_name_.c_str(), poly_.size());
-
-        } 
-        else 
-        {
-          result.successful = false;
-          result.reason = "Failed to parse polygon points string";
-          return result;
+            logger_, "[%s]: Polygon shape updated, %zu vertices",
+            polygon_name_.c_str(), poly_.size());
         }
       }
-    }
-    else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE) 
-    {
-      // Handle other dynamic parameters
-      if (param_name == polygon_name_ + "." + "slowdown_ratio") {
-        if (action_type_ == SLOWDOWN) {
-          slowdown_ratio_ = parameter.as_double();
-        }
-      } else if (param_name == polygon_name_ + "." + "linear_limit") {
-        if (action_type_ == LIMIT) {
-          linear_limit_ = parameter.as_double();
-        }
-      } else if (param_name == polygon_name_ + "." + "angular_limit") {
-        if (action_type_ == LIMIT) {
-          angular_limit_ = parameter.as_double();
-        }
+    } else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE) {
+      if (param_name == polygon_name_ + ".slowdown_ratio" && action_type_ == SLOWDOWN) {
+        slowdown_ratio_ = parameter.as_double();
+      } else if (param_name == polygon_name_ + ".linear_limit" && action_type_ == LIMIT) {
+        linear_limit_ = parameter.as_double();
+      } else if (param_name == polygon_name_ + ".angular_limit" && action_type_ == LIMIT) {
+        angular_limit_ = parameter.as_double();
       }
-    } 
-    else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) 
-    {
-      if (param_name == polygon_name_ + "." + "min_points") {
+    } else if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) {
+      if (param_name == polygon_name_ + ".min_points") {
         min_points_ = parameter.as_int();
+      }
     }
   }
-  }
+}
 
-  result.successful = true;
-  return result;
+void Polygon::setPolygon(const std::vector<Point> & poly)
+{
+  poly_ = poly;
+
+  // Keep the published (visualization) polygon in sync with the new shape
+  polygon_.polygon.points.clear();
+  for (const Point & p : poly_) {
+    geometry_msgs::msg::Point32 p_s;
+    p_s.x = p.x;
+    p_s.y = p.y;
+    // p_s.z will remain 0.0
+    polygon_.polygon.points.push_back(p_s);
+  }
 }
 
 void Polygon::polygonCallback(geometry_msgs::msg::PolygonStamped::ConstSharedPtr msg)
@@ -711,7 +729,7 @@ bool Polygon::getPolygonFromString(
   if (vvf.size() <= 3) {
     RCLCPP_ERROR(
       logger_,
-      "Polygon must have at least three points.");
+      "Polygon must have at least four points.");
     return false;
   }
   for (unsigned int i = 0; i < vvf.size(); i++) {

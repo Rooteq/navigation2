@@ -1,0 +1,8 @@
+# Replace the shapes of one or more polygons of a running collision monitor / detector,
+# and switch them on or off. All polygons in the request are applied together, or none
+# of them is.
+# Only polygons of type "polygon" that are configured with static "points" can be changed.
+NamedPolygon[] polygons
+---
+bool success
+string message

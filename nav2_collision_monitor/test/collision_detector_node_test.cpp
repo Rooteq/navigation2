@@ -817,6 +817,60 @@ TEST_F(Tester, testCollisionPointsMarkers)
   cd_->stop();
 }
 
+TEST_F(Tester, testSetPolygonsService)
+{
+  rclcpp::Time curr_time = cd_->now();
+
+  // Detection region: 4x4 m square around the robot. Obstacle: 1.5 m in front.
+  setCommonParameters();
+  addPolygon("DetectionRegion", POLYGON, 2.0, "none");
+  addSource(RANGE_NAME, RANGE);
+  setVectors({"DetectionRegion"}, {RANGE_NAME});
+  cd_->start();
+  sendTransforms(curr_time);
+  publishRange(1.5, curr_time);
+  ASSERT_TRUE(waitData(1.5, 300ms, curr_time));
+  ASSERT_TRUE(waitState(300ms));
+  ASSERT_EQ(state_msg_->detections.size(), 1u);
+  ASSERT_TRUE(state_msg_->detections[0]);
+
+  // Shrink the region to a 2x2 m square: obstacle is not detected anymore
+  auto client = cd_->create_client<nav2_collision_monitor_msgs::srv::SetPolygons>(
+    "~/set_polygons");
+  ASSERT_TRUE(client->wait_for_service(2s));
+  auto request = std::make_shared<nav2_collision_monitor_msgs::srv::SetPolygons::Request>();
+  nav2_collision_monitor_msgs::msg::NamedPolygon named_polygon;
+  named_polygon.name = "DetectionRegion";
+  for (const auto & xy : std::vector<std::pair<float, float>>{{1, 1}, {1, -1}, {-1, -1}, {-1, 1}}) {
+    geometry_msgs::msg::Point32 p;
+    p.x = xy.first;
+    p.y = xy.second;
+    named_polygon.polygon.points.push_back(p);
+  }
+  request->polygons.push_back(named_polygon);
+  auto result_future = client->async_send_request(request).future.share();
+  rclcpp::Time start_time = cd_->now();
+  while (rclcpp::ok() && cd_->now() - start_time <= rclcpp::Duration(2s) &&
+    result_future.wait_for(10ms) != std::future_status::ready)
+  {
+    rclcpp::spin_some(cd_->get_node_base_interface());
+  }
+  ASSERT_EQ(result_future.wait_for(0s), std::future_status::ready);
+  ASSERT_TRUE(result_future.get()->success) << result_future.get()->message;
+
+  // Fresh obstacle data, so the result does not depend on old data timing out
+  curr_time = cd_->now();
+  sendTransforms(curr_time);
+  publishRange(1.5, curr_time);
+  ASSERT_TRUE(waitData(1.5, 300ms, curr_time));
+  state_msg_ = nullptr;
+  ASSERT_TRUE(waitState(300ms));
+  ASSERT_EQ(state_msg_->detections.size(), 1u);
+  ASSERT_FALSE(state_msg_->detections[0]);
+
+  cd_->stop();
+}
+
 int main(int argc, char ** argv)
 {
   // Initialize the system

@@ -192,6 +192,9 @@ public:
   bool waitToggle(
     rclcpp::Client<nav2_msgs::srv::Toggle>::SharedFuture result_future,
     const std::chrono::nanoseconds & timeout);
+  // Calls set_polygons service. Returns nullptr if there was no response in time.
+  nav2_collision_monitor_msgs::srv::SetPolygons::Response::SharedPtr setPolygons(
+    const std::vector<nav2_collision_monitor_msgs::msg::NamedPolygon> & polygons);
 
 protected:
   void cmdVelOutCallback(geometry_msgs::msg::Twist::SharedPtr msg);
@@ -230,7 +233,25 @@ protected:
 
   // Service client for toggling collision monitor
   rclcpp::Client<nav2_msgs::srv::Toggle>::SharedPtr toggle_client_;
+
+  // Service client for setting polygon shapes
+  rclcpp::Client<nav2_collision_monitor_msgs::srv::SetPolygons>::SharedPtr set_polygons_client_;
 };  // Tester
+
+// Makes a named polygon from flat {x1, y1, x2, y2, ...} vertex coordinates
+static nav2_collision_monitor_msgs::msg::NamedPolygon namedPolygon(
+  const std::string & name, const std::vector<double> & xy)
+{
+  nav2_collision_monitor_msgs::msg::NamedPolygon named_polygon;
+  named_polygon.name = name;
+  for (std::size_t i = 0; i + 1 < xy.size(); i += 2) {
+    geometry_msgs::msg::Point32 p;
+    p.x = xy[i];
+    p.y = xy[i + 1];
+    named_polygon.polygon.points.push_back(p);
+  }
+  return named_polygon;
+}
 
 Tester::Tester()
 {
@@ -266,6 +287,9 @@ Tester::Tester()
       cm_->get_name()) + "/set_parameters");
 
   toggle_client_ = cm_->create_client<nav2_msgs::srv::Toggle>("~/toggle");
+
+  set_polygons_client_ =
+    cm_->create_client<nav2_collision_monitor_msgs::srv::SetPolygons>("~/set_polygons");
 }
 
 Tester::~Tester()
@@ -823,6 +847,23 @@ bool Tester::waitToggle(
     std::this_thread::sleep_for(10ms);
   }
   return false;
+}
+
+nav2_collision_monitor_msgs::srv::SetPolygons::Response::SharedPtr Tester::setPolygons(
+  const std::vector<nav2_collision_monitor_msgs::msg::NamedPolygon> & polygons)
+{
+  auto request = std::make_shared<nav2_collision_monitor_msgs::srv::SetPolygons::Request>();
+  request->polygons = polygons;
+  auto result_future = set_polygons_client_->async_send_request(request).future.share();
+
+  rclcpp::Time start_time = cm_->now();
+  while (rclcpp::ok() && cm_->now() - start_time <= rclcpp::Duration(2s)) {
+    if (result_future.wait_for(10ms) == std::future_status::ready) {
+      return result_future.get();
+    }
+    rclcpp::spin_some(cm_->get_node_base_interface());
+  }
+  return nullptr;
 }
 
 bool Tester::waitActionState(const std::chrono::nanoseconds & timeout)
@@ -1804,6 +1845,174 @@ TEST_F(Tester, testSourceAssociatedToPolygon)
   ASSERT_EQ(action_state_->polygon_name, "SlowdownOnAllSources");
 
   // Stop Collision Monitor node
+  cm_->stop();
+}
+
+TEST_F(Tester, testSetPolygonsService)
+{
+  // Stop polygon: 2x2 m square around the robot. Obstacles: 0.5 m ring around the robot.
+  setCommonParameters();
+  addPolygon("Stop", POLYGON, 1.0, "stop");
+  addSource(SCAN_NAME, SCAN);
+  setVectors({"Stop"}, {SCAN_NAME});
+  cm_->start();
+  ASSERT_TRUE(set_polygons_client_->wait_for_service(2s));
+
+  // 1. Ring is inside the square: robot stops
+  rclcpp::Time curr_time = cm_->now();
+  sendTransforms(curr_time);
+  publishScan(0.5, curr_time);
+  ASSERT_TRUE(waitData(0.5, 500ms, curr_time));
+  publishCmdVel(0.5, 0.2, 0.1);
+  ASSERT_TRUE(waitCmdVel(500ms));
+  ASSERT_NEAR(cmd_vel_out_->linear.x, 0.0, EPSILON);
+  ASSERT_TRUE(waitActionState(500ms));
+  ASSERT_EQ(action_state_->action_type, STOP);
+
+  // 2. Concave U-shape, open to the front: the whole ring sits in its notch, robot drives on
+  auto response = setPolygons(
+    {namedPolygon(
+        "Stop", {1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0,
+          1.0, -0.75, -0.75, -0.75, -0.75, 0.75, 1.0, 0.75})});
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  EXPECT_EQ(
+    cm_->get_parameter("Stop.points").as_string(),
+    "[[1, 1], [-1, 1], [-1, -1], [1, -1], [1, -0.75], [-0.75, -0.75], [-0.75, 0.75], [1, 0.75]]");
+
+  curr_time = cm_->now();
+  sendTransforms(curr_time);
+  publishScan(0.5, curr_time);
+  ASSERT_TRUE(waitData(0.5, 500ms, curr_time));
+  publishCmdVel(0.5, 0.2, 0.1);
+  ASSERT_TRUE(waitCmdVel(500ms));
+  ASSERT_NEAR(cmd_vel_out_->linear.x, 0.5, EPSILON);
+  ASSERT_NEAR(cmd_vel_out_->linear.y, 0.2, EPSILON);
+  ASSERT_NEAR(cmd_vel_out_->angular.z, 0.1, EPSILON);
+  ASSERT_TRUE(waitActionState(500ms));
+  ASSERT_EQ(action_state_->action_type, DO_NOTHING);
+
+  // 3. Concave L-shape on the left reaching into the ring: robot stops again
+  response = setPolygons(
+    {namedPolygon("Stop", {-1.0, 0.25, 1.0, 0.25, 1.0, 0.6, 0.0, 0.6, 0.0, 1.0, -1.0, 1.0})});
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+
+  curr_time = cm_->now();
+  sendTransforms(curr_time);
+  publishScan(0.5, curr_time);
+  ASSERT_TRUE(waitData(0.5, 500ms, curr_time));
+  publishCmdVel(0.5, 0.2, 0.1);
+  ASSERT_TRUE(waitCmdVel(500ms));
+  ASSERT_NEAR(cmd_vel_out_->linear.x, 0.0, EPSILON);
+  ASSERT_TRUE(waitActionState(500ms));
+  ASSERT_EQ(action_state_->action_type, STOP);
+  ASSERT_EQ(action_state_->polygon_name, "Stop");
+
+  cm_->stop();
+}
+
+TEST_F(Tester, testSetPolygonsServiceEnabled)
+{
+  // Two stop polygons: a 2x2 m square around the robot, and a 6x6 m one. Obstacles: 0.5 m ring.
+  setCommonParameters();
+  addPolygon("Stop", POLYGON, 1.0, "stop");
+  addPolygon("Stop2", POLYGON, 3.0, "stop");
+  addSource(SCAN_NAME, SCAN);
+  setVectors({"Stop", "Stop2"}, {SCAN_NAME});
+  cm_->start();
+  ASSERT_TRUE(set_polygons_client_->wait_for_service(2s));
+  const std::string stop_points = cm_->get_parameter("Stop.points").as_string();
+
+  auto drive = [this]() {
+      rclcpp::Time curr_time = cm_->now();
+      sendTransforms(curr_time);
+      publishScan(0.5, curr_time);
+      EXPECT_TRUE(waitData(0.5, 500ms, curr_time));
+      publishCmdVel(0.5, 0.2, 0.1);
+      EXPECT_TRUE(waitCmdVel(500ms));
+      return cmd_vel_out_->linear.x;
+    };
+
+  // 1. Both off, without vertices: they keep their shapes, and the robot drives on
+  auto stop_off = namedPolygon("Stop", {});
+  stop_off.enabled = false;
+  auto stop2_off = namedPolygon("Stop2", {});
+  stop2_off.enabled = false;
+  auto response = setPolygons({stop_off, stop2_off});
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  EXPECT_FALSE(cm_->get_parameter("Stop.enabled").as_bool());
+  EXPECT_FALSE(cm_->get_parameter("Stop2.enabled").as_bool());
+  EXPECT_EQ(cm_->get_parameter("Stop.points").as_string(), stop_points);
+  ASSERT_NEAR(drive(), 0.5, EPSILON);
+
+  // 2. One back on with a new shape, in the same call that keeps the other off: robot stops
+  response = setPolygons(
+    {namedPolygon("Stop", {0.75, 0.75, 0.75, -0.75, -0.75, -0.75, -0.75, 0.75}), stop2_off});
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  EXPECT_TRUE(cm_->get_parameter("Stop.enabled").as_bool());
+  EXPECT_EQ(
+    cm_->get_parameter("Stop.points").as_string(),
+    "[[0.75, 0.75], [0.75, -0.75], [-0.75, -0.75], [-0.75, 0.75]]");
+  ASSERT_NEAR(drive(), 0.0, EPSILON);
+
+  // 3. A polygon switched on needs vertices: rejected, nothing changes
+  auto stop2_on = namedPolygon("Stop2", {});
+  response = setPolygons({stop_off, stop2_on});
+  ASSERT_NE(response, nullptr);
+  EXPECT_FALSE(response->success);
+  EXPECT_TRUE(cm_->get_parameter("Stop.enabled").as_bool());
+  EXPECT_FALSE(cm_->get_parameter("Stop2.enabled").as_bool());
+
+  cm_->stop();
+}
+
+TEST_F(Tester, testSetPolygonsServiceRejected)
+{
+  setCommonParameters();
+  addPolygon("Stop", POLYGON, 1.0, "stop");
+  addPolygon("SlowDown", POLYGON, 2.0, "slowdown");
+  addPolygon("Circle", CIRCLE, 3.0, "limit");
+  addSource(SCAN_NAME, SCAN);
+  setVectors({"Stop", "SlowDown", "Circle"}, {SCAN_NAME});
+  cm_->start();
+  ASSERT_TRUE(set_polygons_client_->wait_for_service(2s));
+
+  const std::string stop_points = cm_->get_parameter("Stop.points").as_string();
+  const std::string slowdown_points = cm_->get_parameter("SlowDown.points").as_string();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const std::vector<double> square{0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5};
+  const std::vector<double> triangle{0.5, 0.5, 0.5, -0.5, -0.5, -0.5};
+
+  // Each request is rejected as a whole
+  const std::vector<std::vector<nav2_collision_monitor_msgs::msg::NamedPolygon>> bad_requests{
+    {},  // no polygons
+    {namedPolygon("Unknown", square)},  // not configured
+    {namedPolygon("Circle", square)},  // not of "polygon" type
+    {namedPolygon("Stop", square), namedPolygon("Stop", square)},  // given twice
+    {namedPolygon("Stop", {0.5, nan, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5})},  // non-finite vertex
+    {namedPolygon("Stop", triangle)},  // too few vertices
+    {namedPolygon("Stop", square), namedPolygon("SlowDown", triangle)}  // one bad: none applied
+  };
+  for (const auto & bad_request : bad_requests) {
+    auto response = setPolygons(bad_request);
+    ASSERT_NE(response, nullptr);
+    EXPECT_FALSE(response->success);
+    EXPECT_FALSE(response->message.empty());
+  }
+  EXPECT_EQ(cm_->get_parameter("Stop.points").as_string(), stop_points);
+  EXPECT_EQ(cm_->get_parameter("SlowDown.points").as_string(), slowdown_points);
+
+  // Both valid: both applied in one call
+  auto response = setPolygons({namedPolygon("Stop", square), namedPolygon("SlowDown", square)});
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(response->success) << response->message;
+  const std::string square_points = "[[0.5, 0.5], [0.5, -0.5], [-0.5, -0.5], [-0.5, 0.5]]";
+  EXPECT_EQ(cm_->get_parameter("Stop.points").as_string(), square_points);
+  EXPECT_EQ(cm_->get_parameter("SlowDown.points").as_string(), square_points);
+
   cm_->stop();
 }
 

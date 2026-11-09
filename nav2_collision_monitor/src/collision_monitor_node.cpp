@@ -24,6 +24,7 @@
 #include "nav2_util/robot_utils.hpp"
 
 #include "nav2_collision_monitor/kinematics.hpp"
+#include "nav2_collision_monitor/set_polygons_service.hpp"
 
 using namespace std::placeholders;
 
@@ -88,6 +89,11 @@ CollisionMonitor::on_configure(const rclcpp_lifecycle::State & state)
   toggle_cm_service_ = create_service<nav2_msgs::srv::Toggle>(
     "~/toggle",
     std::bind(&CollisionMonitor::toggleCMServiceCallback, this, _1, _2, _3));
+
+  // Polygon shapes update service initialization
+  set_polygons_service_ = create_service<nav2_collision_monitor_msgs::srv::SetPolygons>(
+    "~/set_polygons",
+    std::bind(&CollisionMonitor::setPolygonsServiceCallback, this, _1, _2, _3));
 
   nav2_util::declare_parameter_if_not_declared(
     node, "use_realtime_priority", rclcpp::ParameterValue(false));
@@ -174,6 +180,7 @@ CollisionMonitor::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
   cmd_vel_out_pub_.reset();
   state_pub_.reset();
   collision_points_marker_pub_.reset();
+  set_polygons_service_.reset();
 
   polygons_.clear();
   sources_.clear();
@@ -678,6 +685,20 @@ void CollisionMonitor::toggleCMServiceCallback(
 
   response->success = true;
   response->message = message.str();
+}
+
+void CollisionMonitor::setPolygonsServiceCallback(
+  const std::shared_ptr<rmw_request_id_t>/*request_header*/,
+  const std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Request> request,
+  std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Response> response)
+{
+  handleSetPolygons(*this, polygons_, *request, *response);
+
+  // Polygons are published only when cmd_vel_in arrives:
+  // show the new shapes right away, even if the robot is standing
+  if (response->success && process_active_) {
+    publishPolygons();
+  }
 }
 
 }  // namespace nav2_collision_monitor

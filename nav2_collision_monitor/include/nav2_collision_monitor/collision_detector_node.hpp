@@ -28,6 +28,7 @@
 
 #include "nav2_util/lifecycle_node.hpp"
 #include "nav2_msgs/msg/collision_detector_state.hpp"
+#include "nav2_collision_monitor_msgs/srv/set_polygons.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
 #include "nav2_collision_monitor/types.hpp"
@@ -135,6 +136,16 @@ protected:
    */
   void publishPolygons() const;
 
+  /**
+   * @brief Polygon shapes update service callback
+   * @param request Service request
+   * @param response Service response
+   */
+  void setPolygonsServiceCallback(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Request> request,
+    std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Response> response);
+
   // ----- Variables -----
 
   /// @brief TF buffer
@@ -153,6 +164,9 @@ protected:
   /// @brief Collision points marker publisher
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr
     collision_points_marker_pub_;
+  /// @brief Polygon shapes update service
+  rclcpp::Service<nav2_collision_monitor_msgs::srv::SetPolygons>::SharedPtr
+    set_polygons_service_;
   /// @brief timer that runs actions
   rclcpp::TimerBase::SharedPtr timer_;
 

@@ -34,6 +34,7 @@
 #include "nav2_util/twist_subscriber.hpp"
 #include "nav2_msgs/msg/collision_monitor_state.hpp"
 #include "nav2_msgs/srv/toggle.hpp"
+#include "nav2_collision_monitor_msgs/srv/set_polygons.hpp"
 
 #include "nav2_collision_monitor/types.hpp"
 #include "nav2_collision_monitor/polygon.hpp"
@@ -211,6 +212,16 @@ protected:
     const std::shared_ptr<nav2_msgs::srv::Toggle::Request> request,
     std::shared_ptr<nav2_msgs::srv::Toggle::Response> response);
 
+  /**
+   * @brief Polygon shapes update service callback
+   * @param request Service request
+   * @param response Service response
+   */
+  void setPolygonsServiceCallback(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Request> request,
+    std::shared_ptr<nav2_collision_monitor_msgs::srv::SetPolygons::Response> response);
+
   // ----- Variables -----
 
   /// @brief TF buffer
@@ -240,6 +251,10 @@ protected:
 
   /// @brief Enable/disable collision monitor service
   rclcpp::Service<nav2_msgs::srv::Toggle>::SharedPtr toggle_cm_service_;
+
+  /// @brief Polygon shapes update service
+  rclcpp::Service<nav2_collision_monitor_msgs::srv::SetPolygons>::SharedPtr
+    set_polygons_service_;
 
   /// @brief Whether collision monitor is enabled
   bool enabled_;

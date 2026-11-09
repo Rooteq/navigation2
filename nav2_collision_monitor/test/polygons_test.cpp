@@ -1041,6 +1041,98 @@ TEST_F(Tester, testPolygonSourceAssociation)
   ASSERT_EQ(polygon_->getSourcesNames(), poly_sources);
 }
 
+TEST_F(Tester, testPolygonPointsUpdate)
+{
+  createPolygon("stop", true);
+
+  // Valid new (concave) shape is applied
+  ASSERT_TRUE(
+    test_node_->set_parameter(
+      rclcpp::Parameter(std::string(POLYGON_NAME) + ".points", ARBITRARY_POLYGON_STR)).successful);
+
+  std::vector<nav2_collision_monitor::Point> poly;
+  polygon_->getPolygon(poly);
+  ASSERT_EQ(poly.size(), ARBITRARY_POLYGON.size() / 2);
+  for (std::size_t i = 0; i < poly.size(); i++) {
+    EXPECT_NEAR(poly[i].x, ARBITRARY_POLYGON[2 * i], EPSILON);
+    EXPECT_NEAR(poly[i].y, ARBITRARY_POLYGON[2 * i + 1], EPSILON);
+  }
+
+  // Point in the concave notch of the new shape is outside, point in its body is inside
+  const std::vector<nav2_collision_monitor::Point> in_notch{{1.5, 0.5}};
+  const std::vector<nav2_collision_monitor::Point> in_body{{1.5, -0.5}};
+  EXPECT_EQ(polygon_->getPointsInside(in_notch), 0);
+  EXPECT_EQ(polygon_->getPointsInside(in_body), 1);
+
+  // Published polygon shows the new shape
+  polygon_->publish();
+  geometry_msgs::msg::PolygonStamped::SharedPtr polygon_received =
+    test_node_->waitPolygonReceived(500ms);
+  ASSERT_NE(polygon_received, nullptr);
+  ASSERT_EQ(polygon_received->polygon.points.size(), ARBITRARY_POLYGON.size() / 2);
+  EXPECT_NEAR(polygon_received->polygon.points[2].x, ARBITRARY_POLYGON[4], EPSILON);
+  EXPECT_NEAR(polygon_received->polygon.points[2].y, ARBITRARY_POLYGON[5], EPSILON);
+
+  polygon_->deactivate();
+}
+
+TEST_F(Tester, testPolygonPointsUpdateInvalid)
+{
+  createPolygon("stop", true);
+
+  // Triangle and malformed strings are rejected, shape and parameter stay unchanged
+  for (const char * points : {INCORRECT_POINTS_1_STR, INCORRECT_POINTS_2_STR, INVALID_POINTS_STR}) {
+    const rcl_interfaces::msg::SetParametersResult result = test_node_->set_parameter(
+      rclcpp::Parameter(std::string(POLYGON_NAME) + ".points", points));
+    EXPECT_FALSE(result.successful);
+    EXPECT_FALSE(result.reason.empty());
+  }
+  EXPECT_EQ(
+    test_node_->get_parameter(std::string(POLYGON_NAME) + ".points").as_string(),
+    SQUARE_POLYGON_STR);
+
+  std::vector<nav2_collision_monitor::Point> poly;
+  polygon_->getPolygon(poly);
+  ASSERT_EQ(poly.size(), 4u);
+  EXPECT_NEAR(poly[0].x, SQUARE_POLYGON[0], EPSILON);
+  EXPECT_NEAR(poly[0].y, SQUARE_POLYGON[1], EPSILON);
+}
+
+TEST_F(Tester, testPolygonPointsUpdateTopicDriven)
+{
+  // Polygon shape comes from a topic: points cannot be set
+  createPolygon("stop", false);
+
+  const rcl_interfaces::msg::SetParametersResult result = test_node_->set_parameter(
+    rclcpp::Parameter(std::string(POLYGON_NAME) + ".points", SQUARE_POLYGON_STR));
+  EXPECT_FALSE(result.successful);
+
+  std::vector<nav2_collision_monitor::Point> poly;
+  polygon_->getPolygon(poly);
+  EXPECT_TRUE(poly.empty());
+}
+
+TEST_F(Tester, testPolygonDynamicParameters)
+{
+  createPolygon("stop", true);
+
+  const std::string prefix = std::string(POLYGON_NAME) + ".";
+
+  std::vector<rclcpp::Parameter> parameters;
+  parameters.emplace_back(prefix + "enabled", false);
+  parameters.emplace_back(prefix + "min_points", 7);
+  ASSERT_TRUE(test_node_->set_parameters_atomically(parameters).successful);
+  EXPECT_FALSE(polygon_->getEnabled());
+  EXPECT_EQ(polygon_->getMinPoints(), 7);
+
+  // Atomic set with one invalid parameter: nothing is applied
+  parameters.clear();
+  parameters.emplace_back(prefix + "enabled", true);
+  parameters.emplace_back(prefix + "points", INCORRECT_POINTS_1_STR);
+  EXPECT_FALSE(test_node_->set_parameters_atomically(parameters).successful);
+  EXPECT_FALSE(polygon_->getEnabled());
+}
+
 int main(int argc, char ** argv)
 {
   // Initialize the system
